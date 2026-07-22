@@ -7,15 +7,16 @@ import csv
 import json
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
-from profiling.collect_utils import command_display, require_cuda
+from profiling.collect_utils import command_display, failure_kind, require_cuda
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULTS = ROOT / "results" / "profile"
 LOCAL_TRACES = ROOT / "local_artifacts" / "profile"
 LOCAL_SUMMARIES = LOCAL_TRACES / "summaries"
-MODEL_SIZES = ("small", "xl")
+MODEL_SIZES = ("small", "large")
 CONTEXT_LENGTHS = (256, 512, 1024)
 
 
@@ -66,6 +67,30 @@ def merge_summaries(*, results: Path, summaries: Path, run_names: list[str]) -> 
                     writer.writerow(row)
 
 
+def append_failure(
+    path: Path,
+    *,
+    model_size: str,
+    context_length: int,
+    completed: subprocess.CompletedProcess[str],
+) -> str:
+    record = {
+        "timestamp_utc": datetime.now(UTC).isoformat(),
+        "model_size": model_size,
+        "context_length": context_length,
+        "batch_size": 4,
+        "mode": "train_step",
+        "dtype": "fp32",
+        "tool": "torch.profiler",
+        "stage": "benchmark subprocess",
+        "exception": failure_kind(completed),
+        "return_code": completed.returncode,
+    }
+    with path.open("a", encoding="utf-8") as output_file:
+        output_file.write(json.dumps(record, sort_keys=True) + "\n")
+    return failure_kind(completed)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Collect the six guide-compliant Task 2 torch.profiler traces.")
     parser.add_argument("--output-dir", type=Path, default=RESULTS)
@@ -97,11 +122,18 @@ def main(argv: list[str] | None = None) -> None:
         parser.error(str(error))
     args.output_dir.mkdir(parents=True, exist_ok=True)
     (args.output_dir / "runs.jsonl").write_text("", encoding="utf-8")
+    failures = args.output_dir / "failures.jsonl"
+    failures.write_text("", encoding="utf-8")
     run_names: list[str] = []
     metadata: list[dict[str, object]] = []
     for (model_size, context_length, run_name), command in zip(planned_runs, run_commands, strict=True):
         print("Running:", command_display(command), flush=True)
-        subprocess.run(command, cwd=ROOT, check=True)
+        completed = subprocess.run(command, cwd=ROOT, check=False, text=True, stderr=subprocess.PIPE)
+        if completed.returncode != 0:
+            if completed.stderr:
+                print(completed.stderr, file=sys.stderr, end="")
+            append_failure(failures, model_size=model_size, context_length=context_length, completed=completed)
+            continue
         run_names.append(run_name)
         metadata.append(
             {

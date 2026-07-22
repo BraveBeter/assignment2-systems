@@ -1,0 +1,74 @@
+[
+  {
+    "batch_size": 4,
+    "command": "profiling/benchmark.py --model-size xl --context-length 128 --batch-size 4 --mode forward --dtype fp32 --seed 0 --warmup 5 --steps 1 --track-memory --memory-snapshot local_artifacts/memory/xl_ctx128_bs4_forward_fp32.pickle --output results/memory/runs.jsonl",
+    "context_length": 128,
+    "dtype": "fp32",
+    "environment": {
+      "cuda_version": "12.4",
+      "device_name": "NVIDIA GeForce RTX 3090",
+      "python_version": "3.12.13",
+      "torch_version": "2.6.0+cu124"
+    },
+    "measurement_steps": 1,
+    "mode": "forward",
+    "model_size": "xl",
+    "snapshot_file": "xl_ctx128_bs4_forward_fp32.pickle",
+    "timestamp_utc": "2026-07-22T07:41:28.803037+00:00",
+    "warmup_steps": 5
+  },
+  {
+    "batch_size": 4,
+    "command": "profiling/benchmark.py --model-size xl --context-length 2048 --batch-size 4 --mode forward --dtype fp32 --seed 0 --warmup 5 --steps 1 --track-memory --memory-snapshot local_artifacts/memory/xl_ctx2048_bs4_forward_fp32.pickle --output results/memory/runs.jsonl",
+    "context_length": 2048,
+    "dtype": "fp32",
+    "environment": {
+      "cuda_version": "12.4",
+      "device_name": "NVIDIA GeForce RTX 3090",
+      "python_version": "3.12.13",
+      "torch_version": "2.6.0+cu124"
+    },
+    "measurement_steps": 1,
+    "mode": "forward",
+    "model_size": "xl",
+    "snapshot_file": "xl_ctx2048_bs4_forward_fp32.pickle",
+    "timestamp_utc": "2026-07-22T07:42:57.622933+00:00",
+    "warmup_steps": 5
+  },
+  {
+    "batch_size": 4,
+    "command": "profiling/benchmark.py --model-size xl --context-length 128 --batch-size 4 --mode forward --dtype bf16 --seed 0 --warmup 5 --steps 1 --track-memory --memory-snapshot local_artifacts/memory/xl_ctx128_bs4_forward_bf16.pickle --output results/memory/runs.jsonl",
+    "context_length": 128,
+    "dtype": "bf16",
+    "environment": {
+      "cuda_version": "12.4",
+      "device_name": "NVIDIA GeForce RTX 3090",
+      "python_version": "3.12.13",
+      "torch_version": "2.6.0+cu124"
+    },
+    "measurement_steps": 1,
+    "mode": "forward",
+    "model_size": "xl",
+    "snapshot_file": "xl_ctx128_bs4_forward_bf16.pickle",
+    "timestamp_utc": "2026-07-22T07:45:16.969286+00:00",
+    "warmup_steps": 5
+  },
+  {
+    "batch_size": 1,
+    "command": "profiling/benchmark.py --model-size xl --context-length 2048 --batch-size 1 --mode forward --dtype bf16 --seed 0 --warmup 5 --steps 1 --track-memory --memory-snapshot local_artifacts/memory/xl_ctx2048_bs1_forward_bf16.pickle --output results/memory/runs.jsonl",
+    "context_length": 2048,
+    "dtype": "bf16",
+    "environment": {
+      "cuda_version": "12.4",
+      "device_name": "NVIDIA GeForce RTX 3090",
+      "python_version": "3.12.13",
+      "torch_version": "2.6.0+cu124"
+    },
+    "measurement_steps": 1,
+    "mode": "forward",
+    "model_size": "xl",
+    "snapshot_file": "xl_ctx2048_bs1_forward_bf16.pickle",
+    "timestamp_utc": "2026-07-22T07:46:54.228576+00:00",
+    "warmup_steps": 5
+  }
+]

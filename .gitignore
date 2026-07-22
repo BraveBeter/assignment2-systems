@@ -172,3 +172,7 @@ local_artifacts/
 results/profile/traces/
 results/memory/snapshots/
 results/**/*.tmp
+
+# macOS / editor / tool noise
+.DS_Store
+.zcode/

@@ -25,5 +25,13 @@
       "value": 10.000133514404297
     }
   },
-  "timestamp_utc": "2026-07-22T05:54:45.198045+00:00"
+  "timestamp_utc": "2026-07-22T07:27:01.970572+00:00",
+  "toy_bf16": {
+    "fc1_output": "torch.bfloat16",
+    "gradient": "torch.float32",
+    "layer_norm_output": "torch.float32",
+    "logits": "torch.bfloat16",
+    "loss": "torch.float32",
+    "parameters": "torch.float32"
+  }
 }
