@@ -144,6 +144,10 @@ def main(argv: list[str] | None = None) -> None:
                 "mode": "train_step",
                 "dtype": "fp32",
                 "warmup_steps": 5,
+                "warmup_protocol": {
+                    "outside_profiler_steps": 4,
+                    "inside_profiler_steps": 1,
+                },
                 "measurement_steps": 1,
                 "tool": "torch.profiler",
                 "command": command_display(command),

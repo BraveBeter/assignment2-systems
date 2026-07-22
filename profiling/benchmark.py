@@ -336,6 +336,13 @@ def profiler_context(run: RunConfig):
     )
 
 
+def warmup_partition(run: RunConfig) -> tuple[int, int]:
+    """Split warm-up so a torch trace contains one final stable warm-up step."""
+
+    profiled_steps = 1 if run.profile_tool == "torch" and run.warmup_steps > 0 else 0
+    return run.warmup_steps - profiled_steps, profiled_steps
+
+
 def write_profile_summary(profiler: torch.profiler.profile, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = ["name", "stage", "calls", "cpu_time_total_us", "cuda_time_total_us", "self_cpu_time_total_us", "self_cuda_time_total_us"]
@@ -405,30 +412,47 @@ def benchmark(model_config: ModelConfig, run_config: RunConfig, args: argparse.N
         )
     x, y = random_batch(model_config, device)
 
-    with phase("profile/warmup", nvtx=run_config.nvtx, record_function=run_config.profile_tool == "torch"):
-        for global_step in range(run_config.warmup_steps):
-            execute_step(
-                model=model,
-                optimizer=optimizer,
-                x=x,
-                y=y,
-                run=run_config,
-                global_step=global_step,
-                nvtx=run_config.nvtx,
-                record_function=run_config.profile_tool == "torch",
-            )
-            synchronize(device)
+    unprofiled_warmup_steps, profiled_warmup_steps = warmup_partition(run_config)
+    if unprofiled_warmup_steps:
+        with phase("profile/warmup", nvtx=run_config.nvtx, record_function=False):
+            for global_step in range(unprofiled_warmup_steps):
+                execute_step(
+                    model=model,
+                    optimizer=optimizer,
+                    x=x,
+                    y=y,
+                    run=run_config,
+                    global_step=global_step,
+                    nvtx=run_config.nvtx,
+                    record_function=False,
+                )
+                synchronize(device)
 
-    if run_config.track_memory:
-        torch.cuda.reset_peak_memory_stats(device)
     snapshot = MemorySnapshot(args.memory_snapshot)
-    snapshot.start()
     stream = torch.cuda.current_stream(device)
     timer = CudaEventTimer()
     raw_timings_ms: list[float] = []
     profiler = None
     try:
         with profiler_context(run_config) as profiler:
+            if profiled_warmup_steps:
+                with phase("profile/warmup", nvtx=run_config.nvtx, record_function=True):
+                    global_step = unprofiled_warmup_steps
+                    execute_step(
+                        model=model,
+                        optimizer=optimizer,
+                        x=x,
+                        y=y,
+                        run=run_config,
+                        global_step=global_step,
+                        nvtx=run_config.nvtx,
+                        record_function=True,
+                    )
+                    synchronize(device)
+
+            if run_config.track_memory:
+                torch.cuda.reset_peak_memory_stats(device)
+            snapshot.start()
             with phase("profile/measure", nvtx=run_config.nvtx, record_function=run_config.profile_tool == "torch"):
                 for measurement_index in range(run_config.measurement_steps):
                     global_step = run_config.warmup_steps + measurement_index
