@@ -162,3 +162,13 @@ cython_debug/
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+
+# Local profiler artifacts are useful for review, but are prohibited submission files.
+local_artifacts/
+*.nsys-rep
+*.nsys-db
+*.sqlite
+*.pickle
+results/profile/traces/
+results/memory/snapshots/
+results/**/*.tmp
