@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 RESULTS = ROOT / "results" / "profile"
 LOCAL_TRACES = ROOT / "local_artifacts" / "profile"
 LOCAL_SUMMARIES = LOCAL_TRACES / "summaries"
-MODEL_SIZES = ("small", "large")
+MODEL_SIZES = ("small", "medium")
 CONTEXT_LENGTHS = (256, 512, 1024)
 
 
