@@ -1,0 +1,136 @@
+from __future__ import annotations
+
+import csv
+import json
+
+import pytest
+import torch
+
+from profiling.benchmark import Mode, Precision, RunConfig, build_parser, execute_step, public_command, resolve_configs, validate_auxiliary_args
+from profiling.mixed_precision import accumulation_experiment
+from profiling.summarize import read_jsonl, write_benchmark_csv, write_memory_csv
+
+
+def sample_run_config(mode: Mode) -> RunConfig:
+    return RunConfig(
+        model_size="small",
+        mode=mode,
+        precision=Precision.FP32,
+        warmup_steps=5,
+        measurement_steps=10,
+        device="cuda",
+        seed=0,
+        lr_max=1e-3,
+        lr_min=1e-4,
+        weight_decay=0.01,
+        beta1=0.9,
+        beta2=0.999,
+        eps=1e-8,
+        grad_clip=1.0,
+        nvtx=False,
+        profile_tool="none",
+        track_memory=False,
+    )
+
+
+def sample_record(*, memory: bool = False) -> dict[str, object]:
+    return {
+        "timestamp_utc": "2026-07-22T00:00:00+00:00",
+        "model_config": {"vocab_size": 10_000, "context_length": 512, "batch_size": 4, "d_model": 768, "d_ff": 3072, "num_layers": 12, "num_heads": 12},
+        "run_config": {"model_size": "small", "mode": "train_step", "precision": "fp32", "warmup_steps": 5, "measurement_steps": 10},
+        "statistics": {"mean_ms": 1.5, "std_ms": 0.1, "cv": 0.0667},
+        "raw_timings_ms": [1.4, 1.6],
+        "parameter_count": 123,
+        "environment": {"device_name": "Test GPU", "torch_version": "2.x", "cuda_version": "12.x"},
+        "command": "python profiling/benchmark.py",
+        "memory": {
+            "snapshot_file": "test.pickle",
+            "statistics_bytes": {
+                "active_bytes": 10,
+                "peak_active_bytes": 20,
+                "allocated_bytes": 30,
+                "peak_allocated_bytes": 40,
+                "reserved_bytes": 50,
+                "peak_reserved_bytes": 60,
+            },
+        }
+        if memory
+        else None,
+    }
+
+
+def test_parser_resolves_guide_modes_and_model_spec() -> None:
+    args = build_parser().parse_args(["--model-size", "small", "--mode", "forward_backward"])
+    model, run = resolve_configs(args)
+
+    assert model.d_model == 768
+    assert model.context_length == 512
+    assert run.mode is Mode.FORWARD_BACKWARD
+
+
+def test_torch_profiler_requires_both_output_paths() -> None:
+    args = build_parser().parse_args(["--profile-tool", "torch"])
+
+    with pytest.raises(ValueError, match="trace-output"):
+        validate_auxiliary_args(args)
+
+
+def test_public_command_removes_absolute_workspace_path(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    command = public_command(["/usr/bin/python", str(tmp_path / "profiling" / "benchmark.py"), "--output", str(tmp_path / "results" / "raw.jsonl")])
+
+    assert str(tmp_path) not in command
+    assert "profiling/benchmark.py" in command
+    assert "results/raw.jsonl" in command
+
+
+def test_forward_mode_disables_gradients() -> None:
+    class TrackingModel(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.grad_enabled: bool | None = None
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            self.grad_enabled = torch.is_grad_enabled()
+            return x
+
+    model = TrackingModel()
+    execute_step(
+        model=model,  # type: ignore[arg-type]
+        optimizer=None,
+        x=torch.ones(1, dtype=torch.long),
+        y=torch.ones(1, dtype=torch.long),
+        run=sample_run_config(Mode.FORWARD),
+        global_step=0,
+        nvtx=False,
+        record_function=False,
+    )
+
+    assert not model.training
+    assert model.grad_enabled is False
+
+
+def test_accumulation_preserves_input_quantization_error() -> None:
+    values = accumulation_experiment()
+
+    assert values["fp16_accumulator_fp16_input"]["value"] == 9.953125
+    assert values["fp32_accumulator_fp16_input"]["value"] == values["fp32_accumulator_explicit_cast_fp16_input"]["value"]
+    assert values["fp16_accumulator_fp16_input"]["absolute_error_from_10"] > values["fp32_accumulator_fp16_input"]["absolute_error_from_10"]
+
+
+def test_summaries_keep_raw_timings_and_memory_statistics(tmp_path) -> None:
+    record = sample_record(memory=True)
+    raw = tmp_path / "raw.jsonl"
+    raw.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    records = read_jsonl(raw)
+    benchmark_csv = tmp_path / "benchmark.csv"
+    memory_csv = tmp_path / "memory.csv"
+
+    write_benchmark_csv(records, benchmark_csv)
+    write_memory_csv(records, memory_csv)
+
+    benchmark_row = next(csv.DictReader(benchmark_csv.open(encoding="utf-8")))
+    memory_row = next(csv.DictReader(memory_csv.open(encoding="utf-8")))
+    assert benchmark_row["raw_timings_ms"] == "[1.4, 1.6]"
+    assert benchmark_row["peak_reserved_bytes"] == "60"
+    assert memory_row["peak_active_bytes"] == "20"
