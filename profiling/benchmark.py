@@ -12,7 +12,6 @@ Examples:
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import platform
 import shlex
@@ -30,8 +29,10 @@ import torch
 from cs336_basics.model import BasicsTransformerLM
 from cs336_basics.nn_utils import clip_gradient, cross_entropy
 from cs336_basics.optimizer import AdamW, get_cosine_lr
+from profiling.collect_utils import is_cuda_oom_text, requested_allocation_bytes
 from profiling.memory_snapshot import MemorySnapshot, memory_metadata, memory_statistics
 from profiling.nvtx_ranges import install_attention_ranges, phase
+from profiling.trace_summary import write_trace_summary
 
 
 @dataclass(frozen=True)
@@ -94,6 +95,15 @@ class RunConfig:
     track_memory: bool
 
 
+@dataclass
+class FailureContext:
+    """Track the public execution boundary active when a CUDA OOM is raised."""
+
+    scope: str = "initialization"
+    phase: str | None = None
+    device: torch.device | None = None
+
+
 @dataclass(frozen=True)
 class BenchmarkResult:
     model_config: ModelConfig
@@ -154,6 +164,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--profile-summary", type=Path, default=None, help="Compact operator summary CSV for torch.profiler.")
     parser.add_argument("--track-memory", action="store_true", help="Record active/allocated/reserved peak statistics.")
     parser.add_argument("--memory-snapshot", type=Path, default=None, help="PyTorch memory-history pickle path; do not commit it.")
+    parser.add_argument(
+        "--failure-output",
+        type=Path,
+        default=None,
+        help="Write a sanitized structured CUDA-OOM telemetry JSON record before exiting non-zero.",
+    )
     parser.add_argument("--output", type=Path, default=None, help="Append the complete result record as JSONL.")
     parser.add_argument("--metadata", type=Path, default=None, help="Write this run's public, lightweight metadata JSON.")
     return parser
@@ -256,6 +272,131 @@ def random_batch(config: ModelConfig, device: torch.device) -> tuple[torch.Tenso
     )
 
 
+_OOM_MEMORY_STAT_KEYS = {
+    "active_bytes": "active_bytes.all.current",
+    "peak_active_bytes": "active_bytes.all.peak",
+}
+
+
+def _safe_cuda_int(operation: Any) -> int | None:
+    """Run best-effort CUDA telemetry without allowing it to mask an OOM."""
+
+    try:
+        return int(operation())
+    except Exception:
+        return None
+
+
+def _failure_memory_telemetry(device: torch.device | None, error_text: str) -> dict[str, Any]:
+    """Capture only numeric allocator state that remains meaningful after CUDA OOM."""
+
+    stats: dict[str, Any] | None
+    try:
+        stats = torch.cuda.memory_stats(device) if device is not None else None
+    except Exception:
+        stats = None
+
+    values = {
+        name: (int(stats[key]) if stats is not None and key in stats else None)
+        for name, key in _OOM_MEMORY_STAT_KEYS.items()
+    }
+    values.update(
+        {
+            "allocated_bytes": _safe_cuda_int(lambda: torch.cuda.memory_allocated(device)) if device is not None else None,
+            "peak_allocated_bytes": _safe_cuda_int(lambda: torch.cuda.max_memory_allocated(device)) if device is not None else None,
+            "reserved_bytes": _safe_cuda_int(lambda: torch.cuda.memory_reserved(device)) if device is not None else None,
+            "peak_reserved_bytes": _safe_cuda_int(lambda: torch.cuda.max_memory_reserved(device)) if device is not None else None,
+        }
+    )
+    try:
+        free_bytes, total_bytes = torch.cuda.mem_get_info(device) if device is not None else (None, None)
+    except Exception:
+        free_bytes, total_bytes = None, None
+    values.update(
+        {
+            "free_bytes": int(free_bytes) if free_bytes is not None else None,
+            "total_bytes": int(total_bytes) if total_bytes is not None else None,
+            "requested_allocation_bytes": requested_allocation_bytes(error_text),
+        }
+    )
+    available_fields = [name for name, value in values.items() if value is not None]
+    return {
+        "telemetry_status": "available" if len(available_fields) == len(values) else "partial" if available_fields else "unavailable",
+        "unavailable_fields": [name for name, value in values.items() if value is None],
+        "statistics_bytes": {
+            name: values[name]
+            for name in (
+                "active_bytes",
+                "peak_active_bytes",
+                "allocated_bytes",
+                "peak_allocated_bytes",
+                "reserved_bytes",
+                "peak_reserved_bytes",
+            )
+        },
+        "free_bytes": values["free_bytes"],
+        "total_bytes": values["total_bytes"],
+        "requested_allocation_bytes": values["requested_allocation_bytes"],
+    }
+
+
+def _failure_environment(device: torch.device | None) -> dict[str, str | None]:
+    """Collect public environment fields while retaining an explicit unavailable value."""
+
+    device_name: str | None
+    try:
+        device_name = torch.cuda.get_device_name(device) if device is not None else None
+    except Exception:
+        device_name = None
+    return {
+        "device_name": device_name,
+        "torch_version": torch.__version__,
+        "cuda_version": torch.version.cuda,
+        "python_version": platform.python_version(),
+    }
+
+
+def failure_telemetry(
+    *,
+    model_config: ModelConfig,
+    run_config: RunConfig,
+    context: FailureContext,
+    device: torch.device | None,
+    error_text: str,
+) -> dict[str, Any]:
+    """Build the sanitized, child-process-only record used to repair OOM results."""
+
+    peak_scope = {
+        "initialization": "initialization",
+        "warmup": "warmup",
+        "measurement": "post_warmup_measurement",
+    }[context.scope]
+    run_record = asdict(run_config)
+    run_record["mode"] = run_config.mode.value
+    run_record["precision"] = run_config.precision.value
+    return {
+        "schema_version": 1,
+        "timestamp_utc": datetime.now(UTC).isoformat(),
+        "exception": "cuda_oom",
+        "model_config": asdict(model_config),
+        "run_config": run_record,
+        "failure_scope": context.scope,
+        "failure_phase": context.phase,
+        "peak_scope": peak_scope,
+        "memory": _failure_memory_telemetry(device, error_text),
+        "environment": _failure_environment(device),
+    }
+
+
+def write_failure_telemetry(path: Path, telemetry: dict[str, Any]) -> None:
+    """Atomically publish OOM telemetry without retaining the exception text itself."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(json.dumps(telemetry, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
 def autocast_context(precision: Precision):
     if precision is Precision.BF16:
         return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
@@ -272,26 +413,37 @@ def execute_step(
     global_step: int,
     nvtx: bool,
     record_function: bool,
+    failure_context: FailureContext | None = None,
 ) -> None:
     """Run one mode with explicit stage boundaries and no timing logic."""
 
     if run.mode is Mode.FORWARD:
         model.eval()
+        if failure_context is not None:
+            failure_context.phase = "forward"
         with torch.no_grad(), phase("forward", nvtx=nvtx, record_function=record_function), autocast_context(run.precision):
             model(x)
         return
 
     assert optimizer is not None
     model.train()
+    if failure_context is not None:
+        failure_context.phase = "optimizer"
     optimizer.zero_grad(set_to_none=True)
+    if failure_context is not None:
+        failure_context.phase = "forward"
     with phase("forward", nvtx=nvtx, record_function=record_function), autocast_context(run.precision):
         logits = model(x)
         loss = cross_entropy(logits, y)
+    if failure_context is not None:
+        failure_context.phase = "backward"
     with phase("backward", nvtx=nvtx, record_function=record_function):
         loss.backward()
     if run.mode is Mode.FORWARD_BACKWARD:
         return
 
+    if failure_context is not None:
+        failure_context.phase = "optimizer"
     with phase("optimizer", nvtx=nvtx, record_function=record_function):
         clip_gradient(model.parameters(), run.grad_clip)
         learning_rate = get_cosine_lr(
@@ -343,36 +495,10 @@ def warmup_partition(run: RunConfig) -> tuple[int, int]:
     return run.warmup_steps - profiled_steps, profiled_steps
 
 
-def write_profile_summary(profiler: torch.profiler.profile, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = ["name", "stage", "calls", "cpu_time_total_us", "cuda_time_total_us", "self_cpu_time_total_us", "self_cuda_time_total_us"]
-    with path.open("w", encoding="utf-8", newline="") as output_file:
-        writer = csv.DictWriter(output_file, fieldnames=fieldnames)
-        writer.writeheader()
-        stage_names = {
-            "profile/warmup",
-            "profile/measure",
-            "forward",
-            "backward",
-            "optimizer",
-            "attention/scores",
-            "attention/softmax",
-            "attention/value",
-        }
-        for event in profiler.key_averages():
-            cuda_total = getattr(event, "device_time_total", getattr(event, "cuda_time_total", 0.0))
-            self_cuda = getattr(event, "self_device_time_total", getattr(event, "self_cuda_time_total", 0.0))
-            writer.writerow(
-                {
-                    "name": event.key,
-                    "stage": event.key if event.key in stage_names else "",
-                    "calls": event.count,
-                    "cpu_time_total_us": event.cpu_time_total,
-                    "cuda_time_total_us": cuda_total,
-                    "self_cpu_time_total_us": event.self_cpu_time_total,
-                    "self_cuda_time_total_us": self_cuda,
-                }
-            )
+def write_profile_summary(trace_path: Path, path: Path) -> None:
+    """Preserve ``--profile-summary`` while reducing only profile/measure trace data."""
+
+    write_trace_summary(trace_path, path)
 
 
 def public_path(path: Path | None) -> str | None:
@@ -392,7 +518,41 @@ def public_command(arguments: list[str]) -> str:
 
 
 def benchmark(model_config: ModelConfig, run_config: RunConfig, args: argparse.Namespace) -> BenchmarkResult:
+    """Run a benchmark and, on CUDA OOM, let the child persist safe telemetry first."""
+
+    context = FailureContext()
+    try:
+        return _benchmark(model_config, run_config, args, context)
+    except RuntimeError as error:
+        if not is_cuda_oom_text(str(error)):
+            raise
+        failure_output = getattr(args, "failure_output", None)
+        if failure_output is not None:
+            try:
+                write_failure_telemetry(
+                    failure_output,
+                    failure_telemetry(
+                        model_config=model_config,
+                        run_config=run_config,
+                        context=context,
+                        device=context.device,
+                        error_text=str(error),
+                    ),
+                )
+            except Exception:
+                # Preserve the original OOM exit even if allocator telemetry is unavailable.
+                pass
+        raise
+
+
+def _benchmark(
+    model_config: ModelConfig,
+    run_config: RunConfig,
+    args: argparse.Namespace,
+    failure_context: FailureContext,
+) -> BenchmarkResult:
     device = validate_configs(model_config, run_config)
+    failure_context.device = device
     torch.manual_seed(run_config.seed)
     torch.cuda.manual_seed_all(run_config.seed)
 
@@ -413,6 +573,12 @@ def benchmark(model_config: ModelConfig, run_config: RunConfig, args: argparse.N
     x, y = random_batch(model_config, device)
 
     unprofiled_warmup_steps, profiled_warmup_steps = warmup_partition(run_config)
+    failure_context.scope = "warmup"
+    failure_context.phase = None
+    capture_failure_peaks = run_config.track_memory or getattr(args, "failure_output", None) is not None
+    if capture_failure_peaks and device.type == "cuda":
+        # A warm-up OOM should report warm-up-only peaks, not model/input setup peaks.
+        torch.cuda.reset_peak_memory_stats(device)
     if unprofiled_warmup_steps:
         with phase("profile/warmup", nvtx=run_config.nvtx, record_function=False):
             for global_step in range(unprofiled_warmup_steps):
@@ -425,8 +591,11 @@ def benchmark(model_config: ModelConfig, run_config: RunConfig, args: argparse.N
                     global_step=global_step,
                     nvtx=run_config.nvtx,
                     record_function=False,
+                    failure_context=failure_context,
                 )
                 synchronize(device)
+    # All warm-up work has synchronized; setup failures after this point have no stage attribution.
+    failure_context.phase = None
 
     snapshot = MemorySnapshot(args.memory_snapshot)
     stream = torch.cuda.current_stream(device)
@@ -447,10 +616,13 @@ def benchmark(model_config: ModelConfig, run_config: RunConfig, args: argparse.N
                         global_step=global_step,
                         nvtx=run_config.nvtx,
                         record_function=True,
+                        failure_context=failure_context,
                     )
                     synchronize(device)
 
-            if run_config.track_memory:
+            failure_context.scope = "measurement"
+            failure_context.phase = None
+            if capture_failure_peaks and device.type == "cuda":
                 torch.cuda.reset_peak_memory_stats(device)
             snapshot.start()
             with phase("profile/measure", nvtx=run_config.nvtx, record_function=run_config.profile_tool == "torch"):
@@ -469,18 +641,24 @@ def benchmark(model_config: ModelConfig, run_config: RunConfig, args: argparse.N
                                 global_step=global_step,
                                 nvtx=run_config.nvtx,
                                 record_function=run_config.profile_tool == "torch",
+                                failure_context=failure_context,
                             ),
                         )
                     )
     finally:
-        snapshot.stop_and_dump()
+        original_exception_is_active = sys.exc_info()[0] is not None
+        try:
+            snapshot.stop_and_dump()
+        except Exception:
+            if not original_exception_is_active:
+                raise
 
     if profiler is not None:
         assert args.trace_output is not None
         assert args.profile_summary is not None
         args.trace_output.parent.mkdir(parents=True, exist_ok=True)
         profiler.export_chrome_trace(str(args.trace_output))
-        write_profile_summary(profiler, args.profile_summary)
+        write_profile_summary(args.trace_output, args.profile_summary)
 
     statistics_ms = statistics.mean(raw_timings_ms)
     std_ms = statistics.stdev(raw_timings_ms) if len(raw_timings_ms) > 1 else 0.0

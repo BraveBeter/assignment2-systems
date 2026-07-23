@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import subprocess
 import sys
@@ -11,6 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from profiling.collect_utils import command_display, failure_kind, require_cuda
+from profiling.trace_summary import TraceSummaryError, rebuild_profile_artifacts
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULTS = ROOT / "results" / "profile"
@@ -51,22 +51,6 @@ def command_for(*, model_size: str, context_length: int, name: str, results: Pat
     ]
 
 
-def merge_summaries(*, results: Path, summaries: Path, run_names: list[str]) -> None:
-    destination = results / "trace_summary.csv"
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    with destination.open("w", encoding="utf-8", newline="") as output_file:
-        writer: csv.DictWriter | None = None
-        for run_name in run_names:
-            source = summaries / f"{run_name}_ops.csv"
-            with source.open(encoding="utf-8", newline="") as input_file:
-                for row in csv.DictReader(input_file):
-                    row["run_name"] = run_name
-                    if writer is None:
-                        writer = csv.DictWriter(output_file, fieldnames=list(row.keys()))
-                        writer.writeheader()
-                    writer.writerow(row)
-
-
 def append_failure(
     path: Path,
     *,
@@ -95,7 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Collect the six guide-compliant Task 2 torch.profiler traces.")
     parser.add_argument("--output-dir", type=Path, default=RESULTS)
     parser.add_argument("--trace-dir", type=Path, default=LOCAL_TRACES)
-    parser.add_argument("--summary-dir", type=Path, default=LOCAL_SUMMARIES, help="Ignored directory for per-run operator CSVs before aggregation.")
+    parser.add_argument("--summary-dir", type=Path, default=LOCAL_SUMMARIES, help="Ignored directory for per-run measurement-only compatibility CSVs.")
     parser.add_argument("--dry-run", action="store_true", help="Print the six commands without requiring CUDA or writing files.")
     return parser
 
@@ -124,8 +108,6 @@ def main(argv: list[str] | None = None) -> None:
     (args.output_dir / "runs.jsonl").write_text("", encoding="utf-8")
     failures = args.output_dir / "failures.jsonl"
     failures.write_text("", encoding="utf-8")
-    run_names: list[str] = []
-    metadata: list[dict[str, object]] = []
     for (model_size, context_length, run_name), command in zip(planned_runs, run_commands, strict=True):
         print("Running:", command_display(command), flush=True)
         completed = subprocess.run(command, cwd=ROOT, check=False, text=True, stderr=subprocess.PIPE)
@@ -134,30 +116,21 @@ def main(argv: list[str] | None = None) -> None:
                 print(completed.stderr, file=sys.stderr, end="")
             append_failure(failures, model_size=model_size, context_length=context_length, completed=completed)
             continue
-        run_names.append(run_name)
-        metadata.append(
-            {
-                "run_name": run_name,
-                "model_size": model_size,
-                "context_length": context_length,
-                "batch_size": 4,
-                "mode": "train_step",
-                "dtype": "fp32",
-                "warmup_steps": 5,
-                "warmup_protocol": {
-                    "outside_profiler_steps": 4,
-                    "inside_profiler_steps": 1,
-                },
-                "measurement_steps": 1,
-                "tool": "torch.profiler",
-                "command": command_display(command),
-                "trace_file": f"{run_name}.json",
-                "trace_location": "local_artifacts/profile (not submitted)",
-                "summary_file": "trace_summary.csv",
-            }
+    try:
+        report = rebuild_profile_artifacts(
+            trace_dir=args.trace_dir,
+            runs_path=args.output_dir / "runs.jsonl",
+            output_path=args.output_dir / "trace_summary.csv",
+            metadata_output_path=args.output_dir / "run_metadata.json",
+            expected_run_names=[run_name for _, _, run_name in planned_runs],
         )
-    merge_summaries(results=args.output_dir, summaries=args.summary_dir, run_names=run_names)
-    (args.output_dir / "run_metadata.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+    except TraceSummaryError as error:
+        parser.error(f"Profile collection completed incompletely; public artifacts were not replaced: {error}")
+    print(
+        f"Rebuilt measurement-only evidence for {len(report.run_names)}/6 traces "
+        f"({report.row_count} summary rows, {report.metadata_count} metadata records).",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":

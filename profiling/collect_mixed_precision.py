@@ -79,6 +79,7 @@ def main(argv: list[str] | None = None) -> None:
     diagnostic_output = args.output_dir / "mixed_precision.json"
     toy_command = [sys.executable, "profiling/mixed_precision.py", "toy", "--dtype", "bf16", "--output", str(diagnostic_output)]
     accumulation_command = [sys.executable, "profiling/mixed_precision.py", "accumulation", "--output", str(diagnostic_output)]
+    numeric_trend_command = [sys.executable, "profiling/mixed_precision.py", "numeric-trend", "--output", str(diagnostic_output)]
     benchmark_commands = [
         benchmark_command(model_size=model_size, dtype=dtype, mode=mode, output=output)
         for model_size in MODEL_SIZES
@@ -86,7 +87,7 @@ def main(argv: list[str] | None = None) -> None:
         for mode in MODES
     ]
     if args.dry_run:
-        for command in (accumulation_command, toy_command, *benchmark_commands):
+        for command in (accumulation_command, toy_command, numeric_trend_command, *benchmark_commands):
             print("Planned:", command_display(command), flush=True)
         return
     try:
@@ -106,6 +107,20 @@ def main(argv: list[str] | None = None) -> None:
         if toy.stderr:
             print(toy.stderr, file=sys.stderr, end="")
         append_failure(failures, model_size=None, mode=None, dtype="bf16", stage="ToyModel dtype capture", completed=toy)
+
+    print("Running:", command_display(numeric_trend_command), flush=True)
+    numeric_trend = subprocess.run(numeric_trend_command, cwd=ROOT, check=False, text=True, stderr=subprocess.PIPE)
+    if numeric_trend.returncode != 0:
+        if numeric_trend.stderr:
+            print(numeric_trend.stderr, file=sys.stderr, end="")
+        append_failure(
+            failures,
+            model_size="small",
+            mode="train_step",
+            dtype="fp32_vs_bf16",
+            stage="FP32-versus-BF16 numeric trend",
+            completed=numeric_trend,
+        )
 
     for model_size in MODEL_SIZES:
         for dtype in DTYPES:
