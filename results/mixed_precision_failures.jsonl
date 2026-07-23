@@ -1,6 +1,0 @@
-{"dtype": "fp32", "exception": "cuda_oom", "mode": "forward_backward", "model_size": "xl", "return_code": 1, "stage": "benchmark subprocess", "timestamp_utc": "2026-07-22T07:30:28.949066+00:00"}
-{"dtype": "bf16", "exception": "cuda_oom", "mode": "forward_backward", "model_size": "xl", "return_code": 1, "stage": "benchmark subprocess", "timestamp_utc": "2026-07-22T07:31:38.488531+00:00"}
-{"dtype": "fp32", "exception": "cuda_oom", "mode": "forward", "model_size": "10B", "return_code": 1, "stage": "benchmark subprocess", "timestamp_utc": "2026-07-22T07:33:14.497949+00:00"}
-{"dtype": "fp32", "exception": "cuda_oom", "mode": "forward_backward", "model_size": "10B", "return_code": 1, "stage": "benchmark subprocess", "timestamp_utc": "2026-07-22T07:34:50.796545+00:00"}
-{"dtype": "bf16", "exception": "cuda_oom", "mode": "forward", "model_size": "10B", "return_code": 1, "stage": "benchmark subprocess", "timestamp_utc": "2026-07-22T07:36:28.655075+00:00"}
-{"dtype": "bf16", "exception": "cuda_oom", "mode": "forward_backward", "model_size": "10B", "return_code": 1, "stage": "benchmark subprocess", "timestamp_utc": "2026-07-22T07:38:04.474811+00:00"}
