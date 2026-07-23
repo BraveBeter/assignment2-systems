@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import csv
 import json
+from contextlib import contextmanager
+from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 import torch
 
-from profiling.benchmark import Mode, Precision, RunConfig, build_parser, execute_step, public_command, resolve_configs, validate_auxiliary_args
+import profiling.benchmark as benchmark_module
+from profiling.benchmark import Mode, Precision, RunConfig, build_parser, execute_step, public_command, resolve_configs, validate_auxiliary_args, warmup_partition
 from profiling.mixed_precision import accumulation_experiment
 from profiling.summarize import read_jsonl, write_benchmark_csv, write_memory_csv
 
@@ -73,6 +77,104 @@ def test_torch_profiler_requires_both_output_paths() -> None:
 
     with pytest.raises(ValueError, match="trace-output"):
         validate_auxiliary_args(args)
+
+
+def test_torch_profiler_captures_only_the_final_warmup_step() -> None:
+    torch_profile = replace(sample_run_config(Mode.TRAIN_STEP), profile_tool="torch")
+
+    assert warmup_partition(torch_profile) == (4, 1)
+    assert warmup_partition(sample_run_config(Mode.TRAIN_STEP)) == (5, 0)
+
+    no_warmup = replace(torch_profile, warmup_steps=0)
+    assert warmup_partition(no_warmup) == (0, 0)
+
+
+def test_final_warmup_runs_inside_profiler_before_measurement(monkeypatch, tmp_path) -> None:
+    events: list[tuple[object, ...]] = []
+    profiler_active = False
+
+    class FakeModel:
+        def to(self, device: torch.device) -> FakeModel:
+            return self
+
+        def get_num_params(self) -> int:
+            return 0
+
+    class FakeProfiler:
+        def export_chrome_trace(self, path: str) -> None:
+            events.append(("export", path))
+
+    class FakeSnapshot:
+        def __init__(self, path) -> None:
+            self.path = path
+
+        def start(self) -> None:
+            events.append(("snapshot_start",))
+
+        def stop_and_dump(self) -> None:
+            events.append(("snapshot_stop",))
+
+    class FakeTimer:
+        def measure(self, *, stream, execute, device) -> float:
+            execute()
+            return 1.0
+
+    @contextmanager
+    def fake_profiler_context(run):
+        nonlocal profiler_active
+        profiler_active = True
+        try:
+            yield FakeProfiler()
+        finally:
+            profiler_active = False
+
+    @contextmanager
+    def fake_phase(name: str, *, nvtx: bool, record_function: bool):
+        events.append(("phase_enter", name, profiler_active, record_function))
+        try:
+            yield
+        finally:
+            events.append(("phase_exit", name, profiler_active, record_function))
+
+    def fake_execute_step(**kwargs) -> None:
+        events.append(("step", kwargs["global_step"], profiler_active))
+
+    monkeypatch.setattr(benchmark_module, "validate_configs", lambda model, run: torch.device("cpu"))
+    monkeypatch.setattr(benchmark_module, "build_model", lambda config: FakeModel())
+    monkeypatch.setattr(benchmark_module, "random_batch", lambda config, device: (torch.ones(1), torch.ones(1)))
+    monkeypatch.setattr(benchmark_module, "execute_step", fake_execute_step)
+    monkeypatch.setattr(benchmark_module, "synchronize", lambda device: None)
+    monkeypatch.setattr(benchmark_module, "profiler_context", fake_profiler_context)
+    monkeypatch.setattr(benchmark_module, "phase", fake_phase)
+    monkeypatch.setattr(benchmark_module, "MemorySnapshot", FakeSnapshot)
+    monkeypatch.setattr(benchmark_module, "CudaEventTimer", FakeTimer)
+    monkeypatch.setattr(benchmark_module, "write_profile_summary", lambda profiler, path: None)
+    monkeypatch.setattr(benchmark_module.torch, "manual_seed", lambda seed: None)
+    monkeypatch.setattr(benchmark_module.torch.cuda, "manual_seed_all", lambda seed: None)
+    monkeypatch.setattr(benchmark_module.torch.cuda, "current_stream", lambda device: object())
+    monkeypatch.setattr(benchmark_module.torch.cuda, "get_device_name", lambda device: "Test GPU")
+
+    model_config, _ = resolve_configs(build_parser().parse_args([]))
+    run = replace(sample_run_config(Mode.FORWARD), profile_tool="torch", measurement_steps=1)
+    args = SimpleNamespace(
+        memory_snapshot=None,
+        trace_output=tmp_path / "trace.json",
+        profile_summary=tmp_path / "summary.csv",
+    )
+    benchmark_module.benchmark(model_config, run, args)
+
+    step_events = [event for event in events if event[0] == "step"]
+    assert step_events == [
+        ("step", 0, False),
+        ("step", 1, False),
+        ("step", 2, False),
+        ("step", 3, False),
+        ("step", 4, True),
+        ("step", 5, True),
+    ]
+    assert ("phase_enter", "profile/warmup", True, True) in events
+    assert events.index(("snapshot_start",)) > events.index(("step", 4, True))
+    assert events.index(("phase_enter", "profile/measure", True, True)) > events.index(("snapshot_start",))
 
 
 def test_public_command_removes_absolute_workspace_path(monkeypatch, tmp_path) -> None:
