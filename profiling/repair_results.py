@@ -1,9 +1,9 @@
 """Safely repair the incomplete first-round profiling result artifacts.
 
 The offline path rebuilds Task 2 submission artifacts from the retained Chrome
-traces.  The H200 path additionally performs only the missing Task 3 numeric
-diagnostic and Task 4 OOM replays; it deliberately does not re-run completed
-benchmark, profile, or memory experiments.
+traces.  The H200 path validates those already-published Task 2 artifacts, then
+performs only the missing Task 3 numeric diagnostic and Task 4 OOM replays; it
+deliberately does not re-run completed benchmark or profile experiments.
 """
 
 from __future__ import annotations
@@ -329,6 +329,25 @@ def preflight_profile_inputs() -> None:
     ]
     print("Preflight:", " ".join(command), flush=True)
     subprocess.run(command, cwd=ROOT, check=True)
+
+
+def validate_existing_task2_for_h200() -> None:
+    """Require a valid local Task 2 publication without requiring raw traces.
+
+    Raw Chrome traces are intentionally ignored by Git, whereas the repaired
+    CSV and metadata are public result artifacts.  The H200-only repair must
+    not force users to copy retained traces merely to fill the independent
+    Task 3 and Task 4 gaps.
+    """
+
+    try:
+        validate_profile_outputs(PROFILE_SUMMARY, PROFILE_METADATA)
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        raise ValueError(
+            "--run-h200-repairs only repairs Task 3 and Task 4, but the existing Task 2 "
+            f"publication is not valid: {error}. Run --offline on a machine that retains the six Chrome traces."
+        ) from error
+    print("Task 2 publication preflight passed; retained Chrome traces will not be read or re-run.", flush=True)
 
 
 def require_h200(*, allow_other_cuda: bool) -> None:
@@ -739,9 +758,9 @@ def print_status() -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Repair first-round profiling results without re-running completed experiments.")
     actions = parser.add_mutually_exclusive_group(required=True)
-    actions.add_argument("--dry-run", action="store_true", help="Print the complete repair sequence without writing files or requiring CUDA.")
+    actions.add_argument("--dry-run", action="store_true", help="Validate existing Task 2 results and print the Task 3/4 H200 repair sequence without writing files or requiring CUDA.")
     actions.add_argument("--offline", action="store_true", help="Rebuild only profile summary and metadata from local traces.")
-    actions.add_argument("--run-h200-repairs", action="store_true", help="Run offline repair plus the one numeric diagnostic and two OOM replays on H200.")
+    actions.add_argument("--run-h200-repairs", action="store_true", help="On H200, repair only Task 3 numeric trend and the two Task 4 OOM records; retain validated Task 2 artifacts.")
     actions.add_argument("--status", action="store_true", help="Read existing result artifacts and print repair completion status.")
     parser.add_argument("--allow-other-cuda", action="store_true", help="Permit --run-h200-repairs on a non-H200 CUDA GPU; the actual environment remains recorded.")
     return parser
@@ -754,30 +773,34 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.dry_run:
-        print("Dry run: no files will be created or changed; H200 work is shown but not executed.", flush=True)
-        preflight_profile_inputs()
+        print("Dry run: no files will be created or changed; only Task 3/4 H200 work is shown.", flush=True)
+        validate_existing_task2_for_h200()
         # This literal placeholder avoids even a temporary directory write in dry-run mode.
         stage = STAGING_ROOT / "DRY_RUN"
-        rebuild_profile(stage=stage / "profile", dry_run=True)
         collect_numeric_trend(stage=stage / "mixed", dry_run=True)
         replay_ooms(stage=stage / "memory", dry_run=True)
         return 0
 
+    if args.offline:
+        preflight_profile_inputs()
+        STAGING_ROOT.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="repair-", dir=STAGING_ROOT) as temporary_directory:
+            stage = Path(temporary_directory)
+            profile_pairs = rebuild_profile(stage=stage / "profile", dry_run=False)
+            atomic_publish(profile_pairs)
+        print("Published measurement-only profile summary and environment-complete metadata.", flush=True)
+        print_status()
+        return 0
+
+    validate_existing_task2_for_h200()
     STAGING_ROOT.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="repair-", dir=STAGING_ROOT) as temporary_directory:
         stage = Path(temporary_directory)
-        profile_pairs = rebuild_profile(stage=stage / "profile", dry_run=False)
-        if args.offline:
-            atomic_publish(profile_pairs)
-            print("Published measurement-only profile summary and environment-complete metadata.", flush=True)
-            print_status()
-            return 0
-
         require_h200(allow_other_cuda=args.allow_other_cuda)
         numeric_pairs = collect_numeric_trend(stage=stage / "mixed", dry_run=False)
         memory_pairs = replay_ooms(stage=stage / "memory", dry_run=False)
-        atomic_publish((*profile_pairs, *numeric_pairs, *memory_pairs))
-        print("Published the validated profile, numeric-trend, and selective OOM-repair artifact groups.", flush=True)
+        atomic_publish((*numeric_pairs, *memory_pairs))
+        print("Published the validated Task 3 numeric-trend and Task 4 selective OOM-repair artifacts.", flush=True)
     print_status()
     return 0
 

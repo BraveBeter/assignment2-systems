@@ -308,3 +308,32 @@ def test_atomic_publish_rolls_back_every_public_file_after_a_mid_group_failure(m
     assert destination_one.read_text(encoding="utf-8") == "old one"
     assert destination_two.read_text(encoding="utf-8") == "old two"
     assert not list(tmp_path.glob(".*.repair-*.bak"))
+
+
+def test_h200_entrypoint_repairs_only_task3_and_task4_without_reading_traces(monkeypatch, tmp_path) -> None:
+    calls: list[str] = []
+    numeric_pair = (tmp_path / "numeric-stage.json", tmp_path / "numeric-public.json")
+    memory_pair = (tmp_path / "memory-stage.json", tmp_path / "memory-public.json")
+
+    monkeypatch.setattr(repair_results, "STAGING_ROOT", tmp_path / "repair-staging")
+    monkeypatch.setattr(repair_results, "validate_existing_task2_for_h200", lambda: calls.append("task2-validation"))
+    monkeypatch.setattr(repair_results, "require_h200", lambda **kwargs: calls.append("h200-preflight"))
+    monkeypatch.setattr(repair_results, "collect_numeric_trend", lambda **kwargs: (calls.append("task3"), (numeric_pair,))[1])
+    monkeypatch.setattr(repair_results, "replay_ooms", lambda **kwargs: (calls.append("task4"), (memory_pair,))[1])
+    monkeypatch.setattr(repair_results, "atomic_publish", lambda pairs: calls.append(f"publish:{tuple(pairs)}"))
+    monkeypatch.setattr(repair_results, "print_status", lambda: calls.append("status"))
+    monkeypatch.setattr(
+        repair_results,
+        "rebuild_profile",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("H200 repair must not rebuild Task 2")),
+    )
+    monkeypatch.setattr(
+        repair_results,
+        "preflight_profile_inputs",
+        lambda: (_ for _ in ()).throw(AssertionError("H200 repair must not read retained traces")),
+    )
+
+    assert repair_results.main(["--run-h200-repairs"]) == 0
+    assert calls[:4] == ["task2-validation", "h200-preflight", "task3", "task4"]
+    assert calls[4] == f"publish:{(numeric_pair, memory_pair)}"
+    assert calls[5] == "status"
