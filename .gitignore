@@ -176,3 +176,4 @@ results/**/*.tmp
 # macOS / editor / tool noise
 .DS_Store
 .zcode/
+.idea
