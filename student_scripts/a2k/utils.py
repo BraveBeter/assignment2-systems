@@ -3,10 +3,13 @@ from __future__ import annotations
 import csv
 import importlib.metadata
 import json
+import os
 import statistics
 import subprocess
 import sys
+import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from importlib import import_module
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +19,9 @@ import torch
 MIB = 1024**2
 ALLOCATOR_LIMIT_BYTES = 23 * 1024**3
 MIN_FREE_BYTES = 22 * 1024**3
+ATTENTION_WARMUP_MS = 100
+ATTENTION_REP_MS = 300
+ATTENTION_QUANTILES = (0.2, 0.5, 0.8)
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -46,8 +52,10 @@ def _package_version(name: str) -> str:
 
 
 def _nvidia_smi() -> dict[str, Any]:
+    visible_devices = [device.strip() for device in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",") if device.strip()]
     command = [
         "nvidia-smi",
+        *(["-i", visible_devices[0]] if len(visible_devices) == 1 else []),
         "--query-gpu=name,memory.total,memory.free,driver_version,power.limit,pstate",
         "--format=csv,noheader,nounits",
     ]
@@ -127,7 +135,52 @@ def seed_all(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
-def benchmark_cuda_step(step: Callable[[], None], warmup: int, repetitions: int) -> tuple[list[float], float, float, float]:
+def allocator_evidence() -> dict[str, int | float]:
+    return {
+        "limit_bytes": ALLOCATOR_LIMIT_BYTES,
+        "limit_mib": ALLOCATOR_LIMIT_BYTES / MIB,
+        "hard_gpu_limit_gib": 24,
+    }
+
+
+def benchmark_cuda(step: Callable[[], Any]) -> tuple[float, float, float]:
+    values = import_module("triton.testing").do_bench(
+        step,
+        warmup=ATTENTION_WARMUP_MS,
+        rep=ATTENTION_REP_MS,
+        quantiles=list(ATTENTION_QUANTILES),
+    )
+    return float(values[0]), float(values[1]), float(values[2])
+
+
+def timed_cuda_call(call: Callable[[], Any]) -> tuple[Any, float]:
+    torch.cuda.synchronize()
+    start = time.perf_counter()
+    result = call()
+    torch.cuda.synchronize()
+    return result, (time.perf_counter() - start) * 1_000
+
+
+def measure_cuda_peak(step: Callable[[], Any]) -> tuple[float, float]:
+    torch.cuda.synchronize()
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats()
+    step()
+    torch.cuda.synchronize()
+    return torch.cuda.max_memory_allocated() / MIB, torch.cuda.max_memory_reserved() / MIB
+
+
+def sample_quantiles(samples: Sequence[float]) -> tuple[float, float, float]:
+    values = torch.tensor(samples, dtype=torch.float64)
+    quantiles = torch.quantile(values, torch.tensor(ATTENTION_QUANTILES, dtype=torch.float64))
+    return float(quantiles[0]), float(quantiles[1]), float(quantiles[2])
+
+
+def latency_columns(prefix: str, values: Sequence[float]) -> dict[str, float]:
+    return {f"{prefix}_ms_p{percentile}": float(value) for percentile, value in zip((20, 50, 80), values, strict=True)}
+
+
+def benchmark_cuda_step(step: Callable[[], Any], warmup: int, repetitions: int) -> tuple[list[float], float, float, float]:
     for _ in range(warmup):
         step()
     torch.cuda.synchronize()
