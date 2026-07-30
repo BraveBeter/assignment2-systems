@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import pickle
 import subprocess
 from contextlib import contextmanager
 from dataclasses import replace
@@ -16,6 +17,7 @@ from profiling.benchmark import Mode, Precision, RunConfig, build_parser, execut
 import profiling.collect_memory as collect_memory_module
 from profiling.collect_memory import failure_record, retry_existing_oom
 from profiling.collect_utils import requested_allocation_bytes
+from profiling.analyze_memory_snapshot import MemorySnapshotAnalysisError, analysis_as_dict, analyze_snapshot, format_text_report, load_snapshot
 from profiling.mixed_precision import accumulation_experiment, numeric_error_metrics, summarize_numeric_steps
 from profiling.summarize import read_jsonl, write_benchmark_csv, write_memory_csv
 from profiling.trace_summary import TraceSummaryError, metadata_from_records, summarize_trace
@@ -670,3 +672,67 @@ def test_profile_metadata_is_built_from_audit_environment_without_absolute_paths
     assert metadata[0]["warmup_protocol"] == {"outside_profiler_steps": 4, "inside_profiler_steps": 1}
     assert "/Users/example" not in metadata[0]["command"]
     assert metadata[0]["trace_file"] == "small_ctx512_train_step_fp32.json"
+
+
+def _memory_event(*, action: str, size: int, frames: list[dict[str, object]], address: int = 123) -> dict[str, object]:
+    return {
+        "action": action,
+        "addr": address,
+        "size": size,
+        "stream": 0,
+        "time_us": 42,
+        "frames": frames,
+    }
+
+
+def test_memory_snapshot_analysis_uses_alloc_events_and_keeps_tied_traces(tmp_path) -> None:
+    score_frames = [
+        {"name": "CUDACachingAllocator::allocate", "filename": "CUDACachingAllocator.cpp", "line": 0},
+        {"name": "scaled_dot_product_attention", "filename": "/project/model.py", "line": 427},
+    ]
+    softmax_frames = [
+        {"name": "CUDACachingAllocator::allocate", "filename": "CUDACachingAllocator.cpp", "line": 0},
+        {"name": "softmax", "filename": "/project/nn_utils.py", "line": 6},
+    ]
+    snapshot_path = tmp_path / "memory.pickle"
+    with snapshot_path.open("wb") as snapshot_file:
+        pickle.dump(
+            {
+                "device_traces": [
+                    [
+                        _memory_event(action="free_requested", size=4_096, frames=[]),
+                        _memory_event(action="alloc", size=512, frames=score_frames, address=11),
+                        _memory_event(action="alloc", size=512, frames=score_frames, address=12),
+                        _memory_event(action="alloc", size=512, frames=softmax_frames, address=13),
+                        _memory_event(action="alloc", size=128, frames=[]),
+                    ]
+                ]
+            },
+            snapshot_file,
+        )
+
+    analysis = analyze_snapshot(load_snapshot(snapshot_path))
+
+    assert analysis.allocation_event_count == 4
+    assert analysis.largest_allocation_bytes == 512
+    assert len(analysis.tied_events) == 3
+    assert [len(group.events) for group in analysis.tied_trace_groups] == [2, 1]
+    assert analysis.representative.event_index == 1
+    assert analysis_as_dict(snapshot_path, analysis)["representative_event"]["application_callsite"] == "/project/model.py:427 (scaled_dot_product_attention)"
+
+    report = format_text_report(snapshot_path, analysis, show_frames=True, max_trace_groups=1)
+    assert "Largest single alloc: 512 bytes" in report
+    assert "Full stack trace" in report
+    assert "... 1 additional group(s)" in report
+
+
+def test_memory_snapshot_analysis_rejects_snapshots_without_allocations(tmp_path) -> None:
+    snapshot_path = tmp_path / "no-allocations.pickle"
+    with snapshot_path.open("wb") as snapshot_file:
+        pickle.dump(
+            {"device_traces": [[_memory_event(action="free_completed", size=16, frames=[])]]},
+            snapshot_file,
+        )
+
+    with pytest.raises(MemorySnapshotAnalysisError, match="contains no allocator events"):
+        analyze_snapshot(load_snapshot(snapshot_path))
