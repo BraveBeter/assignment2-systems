@@ -135,8 +135,10 @@ def seed_all(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
-def allocator_evidence() -> dict[str, int | float]:
+def allocator_evidence(fraction: float | None = None) -> dict[str, int | float]:
     return {
+        "allocator_fraction": float(fraction if fraction is not None else 1.0),
+        "allocator_limit_mib": ALLOCATOR_LIMIT_BYTES / MIB,
         "limit_bytes": ALLOCATOR_LIMIT_BYTES,
         "limit_mib": ALLOCATOR_LIMIT_BYTES / MIB,
         "hard_gpu_limit_gib": 24,

@@ -1,5 +1,7 @@
 {
   "allocator": {
+    "allocator_fraction": 0.4854174583443363,
+    "allocator_limit_mib": 23552.0,
     "limit_bytes": 24696061952,
     "limit_mib": 23552.0,
     "hard_gpu_limit_gib": 24

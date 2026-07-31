@@ -289,6 +289,12 @@ shape 的 eager 行。
 长序列上 Triton 不保存完整 `S/P` 矩阵，因此显存和 eager 的差距扩大；例如 16384×64 的
 peak reserved 从 3862 MiB 降至 22 MiB，同时 forward-backward 加速约 13.21×。
 
+两张图均以 head dimension 64 的 forward p50 为纵轴，并改用对数 y 轴；每条曲线的最大值
+都用箭头直接标注，避免 Triton 曲线因数量级较小而贴在底部不可读。对应最大值为：latency
+方面 eager 8.542 ms（S=16384）、compiled 0.679 ms（S=8192）、Triton 0.506 ms（S=16384）；
+显存方面 eager 2320.3 MiB（S=16384）、compiled 333.2 MiB（S=8192）、Triton 10.1 MiB
+（S=16384）。
+
 ![FlashAttention latency](../../assets/flash_latency.png)
 
 ![FlashAttention memory](../../assets/flash_memory.png)

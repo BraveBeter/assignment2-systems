@@ -193,7 +193,7 @@ def write_outputs(results: list[dict[str, Any]]) -> None:
 
     successful = [row for row in rows if row["status"] == "success"]
     evidence = load_json(MEMORY_PATH)
-    evidence["allocator"] = allocator_evidence()
+    evidence["allocator"] = allocator_evidence(metadata.get("allocator", {}).get("fraction"))
     evidence["attention_baseline"] = {
         "highest_peak_allocated_mib": max((float(row["peak_allocated_mib"]) for row in successful), default=None),
         "highest_peak_reserved_mib": max((float(row["peak_reserved_mib"]) for row in successful), default=None),

@@ -137,7 +137,7 @@ def write_outputs(results: list[dict[str, Any]]) -> None:
     metadata.update({key: value for key, value in first_metadata.items() if key not in metadata})
     write_json(METADATA_PATH, metadata)
     evidence = load_json(MEMORY_PATH)
-    evidence["allocator"] = allocator_evidence()
+    evidence["allocator"] = allocator_evidence(metadata.get("allocator", {}).get("fraction"))
     evidence["flash_benchmark"] = {"highest_peak_allocated_mib": max((float(row["peak_allocated_mib"]) for row in successful), default=None), "highest_peak_reserved_mib": max((float(row["peak_reserved_mib"]) for row in successful), default=None), "within_23gib_allocator": all(float(row["peak_reserved_mib"]) <= ALLOCATOR_LIMIT_BYTES / MIB for row in successful), "config_status": {row["config_id"]: row["status"] for row in rows}}
     evidence["hard_limit_mib"] = 24 * 1024
     refresh_memory_summary(evidence)

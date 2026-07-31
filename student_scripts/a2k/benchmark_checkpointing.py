@@ -13,7 +13,7 @@ from torch.utils.checkpoint import checkpoint
 
 from cs336_basics.model import BasicsTransformerLM
 from cs336_basics.nn_utils import cross_entropy
-from student_scripts.a2k.utils import ALLOCATOR_LIMIT_BYTES, MIB, benchmark_cuda_step, configure_cuda, cuda_peak_mib, is_cuda_oom, load_json, refresh_memory_summary, seed_all, write_csv, write_json
+from student_scripts.a2k.utils import ALLOCATOR_LIMIT_BYTES, MIB, allocator_evidence, benchmark_cuda_step, configure_cuda, cuda_peak_mib, is_cuda_oom, load_json, refresh_memory_summary, seed_all, write_csv, write_json
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -212,11 +212,7 @@ def write_outputs(results: list[dict[str, Any]]) -> None:
     allocated = [float(row["peak_allocated_mib"]) for row in rows if row["peak_allocated_mib"] != ""]
     reserved = [float(row["peak_reserved_mib"]) for row in rows if row["peak_reserved_mib"] != ""]
     evidence = load_json(MEMORY_PATH)
-    evidence["allocator"] = {
-        "limit_bytes": ALLOCATOR_LIMIT_BYTES,
-        "limit_mib": ALLOCATOR_LIMIT_BYTES / MIB,
-        "hard_gpu_limit_gib": 24,
-    }
+    evidence["allocator"] = allocator_evidence(metadata.get("allocator", {}).get("fraction"))
     evidence["checkpointing"] = {
         "highest_peak_allocated_mib": max(allocated, default=None),
         "highest_peak_reserved_mib": max(reserved, default=None),
