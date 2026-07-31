@@ -95,3 +95,78 @@ uv run python -m student_scripts.a2k.benchmark_compile
 -->
 
 （待填）
+
+# 任务三：FlashAttention-2 前向
+
+实现位于 `cs336_systems/a2k/attention.py`，并通过 `tests/adapters.py` 暴露
+`FlashAttentionPyTorch` 与 `FlashAttentionTriton` 两个 `torch.autograd.Function`。两条路径
+接口均为 `apply(Q, K, V, is_causal=False)`，支持 `[batch, sequence, head_dim]` 输入和
+causal/non-causal；前向保存 `Q/K/V/O` 及唯一一个 `[batch, n_queries]` 的 FP32
+log-sum-exp `L`。
+
+PyTorch reference 逐个 `128×128` tile 维护 FP32 行级 running maximum `m`、normalizer
+`l` 与 output accumulator：
+
+```text
+m' = max(m, rowmax(S)); P̃ = exp(S - m')
+l' = exp(m - m')l + rowsum(P̃)
+O' = exp(m - m')O + P̃V; L = m' + log(l')
+```
+
+Triton 路径使用自写 `@triton.jit flash_fwd_kernel`：一个 program instance 负责一个
+query tile 与 batch index，kernel 内仅循环 key/value tiles；`m/l/accumulator` 均使用 FP32。
+当前 launch 配置是 query/key tile `64/64`、`num_warps=4`、`num_stages=2`。causal mask 用
+全局 query/key index 比较，masked score 为题面规定的 `-1e6`。
+
+远端复现：
+
+```bash
+uv run pytest tests/test_attention.py -v
+uv run python -m student_scripts.a2k.check_flash_attention
+```
+
+（待填：RTX 4090 型号、commit、官方 tests 的 pass/fail/skip；`results/correctness.json`
+会记录三组 seed、head dimension `32/64/128`、两种 mask 下的 `O/L/dQ/dK/dV` 误差。）
+
+# 任务四：FlashAttention-2 重计算反向
+
+纯 PyTorch 路径使用 `flash_attention_backward`；Triton 路径使用三个自写 kernel，均只由保存的
+`L` 和输入/输出重算而不保存 attention probability matrix：
+
+```text
+D = rowsum(O ⊙ dO); P = exp(QKᵀ / √d - L)
+dV = PᵀdO; dS = P ⊙ (dOVᵀ - D)
+dQ = dSK / √d; dK = dSᵀQ / √d
+```
+
+Triton 先计算 FP32 `D = rowsum(O ⊙ dO)`；随后按 Algorithm 2 分两遍重算 `P`：一个 key-tile
+program 独立累加并写回 `dK/dV`，另一个 query-tile program 独立累加并写回 `dQ`。因此不需要
+跨 program 同步或 atomic，且瞬时 score/probability 仅为一个 tile。causal 反向复用与前向相同
+的 mask，返回梯度顺序为 `Q/K/V/is_causal`。
+
+（待填：远端梯度误差与官方 CUDA tests 结果。）
+
+# 任务五：正确性与性能矩阵（待远端 RTX 4090 运行）
+
+`student_scripts/a2k/benchmark_flash_attention.py` 以 implementation/shape 独立子进程测量
+核心矩阵（BF16、batch size 1、causal、sequence length `512/2048/8192`、head dimension
+`64/128`）的 eager PyTorch、compiled PyTorch 与 Triton 的 forward、backward、forward-backward。
+16384 边界矩阵比较 eager 与 Triton；每行记录 `do_bench(warmup=100, rep=300)` 的
+p20/p50/p80、peak allocated/reserved、同 shape eager speedup、status，及 Triton launch
+参数；OOM 行会保留。
+
+```bash
+uv run python -m student_scripts.a2k.benchmark_flash_attention
+```
+
+也可以在远端 GPU 上用一条命令串行运行任务一至任务五；测试输出会脱敏后写入
+`results/unit_tests.txt`：
+
+```bash
+bash student_scripts/a2k/run_all_experiments.sh
+```
+
+矩阵完成后，`student_scripts.a2k.plot_flash_results` 会从成功行生成
+`assets/flash_latency.png` 与 `assets/flash_memory.png`。待远端运行后再填入核心/边界矩阵、
+OOM/编译失败记录、两张图及分析；`run_metadata.json` 和 `memory_evidence.json` 会保存可复现
+环境与显存摘要。
