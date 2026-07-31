@@ -57,7 +57,8 @@
   },
   "commands": {
     "attention_baseline": "uv run python -m student_scripts.a2k.benchmark_attention",
-    "compile_comparison": "uv run python -m student_scripts.a2k.benchmark_compile"
+    "compile_comparison": "uv run python -m student_scripts.a2k.benchmark_compile",
+    "flash_benchmark": "uv run python -m student_scripts.a2k.benchmark_flash_attention"
   },
   "attention_baseline": {
     "seed": 336,
@@ -159,5 +160,68 @@
       "model_eager_s512_d64": 48125.8125,
       "model_compiled_s512_d64": 48125.8125
     }
+  },
+  "flash_benchmark": {
+    "commit": "d7eef15728b3a181c5b9dfa6812ce19e1e310461",
+    "seed": 336,
+    "batch_size": 1,
+    "dtype": "bfloat16",
+    "causal": true,
+    "core_configs": [
+      [
+        512,
+        64
+      ],
+      [
+        512,
+        128
+      ],
+      [
+        2048,
+        64
+      ],
+      [
+        2048,
+        128
+      ],
+      [
+        8192,
+        64
+      ],
+      [
+        8192,
+        128
+      ]
+    ],
+    "boundary_configs": [
+      [
+        16384,
+        64
+      ],
+      [
+        16384,
+        128
+      ]
+    ],
+    "phases": [
+      "forward",
+      "backward",
+      "forward_backward"
+    ],
+    "implementations": [
+      "explicit_pytorch_eager",
+      "compiled_pytorch",
+      "triton_flashattention"
+    ],
+    "timer": "triton.testing.do_bench",
+    "warmup_ms": 100,
+    "measurement_ms": 300,
+    "quantiles": [
+      0.2,
+      0.5,
+      0.8
+    ],
+    "process_isolation": "one fresh Python process per implementation and shape",
+    "peak_memory_scope": "one steady-state phase call after empty_cache and reset_peak_memory_stats"
   }
 }
