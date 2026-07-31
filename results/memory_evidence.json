@@ -44,7 +44,7 @@
       "attention_eager_s8192_d128": "success",
       "attention_compiled_s8192_d128": "success",
       "model_eager_s512_d64": "success",
-      "model_compiled_s512_d64": "error:AssertionError"
+      "model_compiled_s512_d64": "success"
     }
   },
   "flash_benchmark": {

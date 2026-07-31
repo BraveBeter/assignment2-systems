@@ -7,7 +7,7 @@
     "memory_free_mib_nvidia_smi": 48126.0,
     "driver_version": "570.124.06",
     "power_limit_w": 450.0,
-    "pstate": "P8",
+    "pstate": "P5",
     "compute_capability": "8.9",
     "total_memory_mib": 48519.0625,
     "start_free_memory_mib": 48125.8125
@@ -58,7 +58,8 @@
   "commands": {
     "attention_baseline": "uv run python -m student_scripts.a2k.benchmark_attention",
     "compile_comparison": "uv run python -m student_scripts.a2k.benchmark_compile",
-    "flash_benchmark": "uv run python -m student_scripts.a2k.benchmark_flash_attention"
+    "flash_benchmark": "uv run python -m student_scripts.a2k.benchmark_flash_attention",
+    "flash_correctness": "python -m student_scripts.a2k.check_flash_attention"
   },
   "attention_baseline": {
     "seed": 336,
@@ -138,7 +139,11 @@
       "optimizer": "torch.optim.AdamW(lr=1e-3, weight_decay=0.01)",
       "warmup_steps": 5,
       "measurement_steps": 10,
-      "timer": "torch.cuda.Event"
+      "timer": "torch.cuda.Event",
+      "correctness_tolerance": {
+        "rtol": 0.01,
+        "atol": 0.015
+      }
     },
     "compile": {
       "backend": "inductor",
@@ -162,7 +167,7 @@
     }
   },
   "flash_benchmark": {
-    "commit": "d7eef15728b3a181c5b9dfa6812ce19e1e310461",
+    "commit": "5890454a042ef6db6a12c205ccf8a0a530cc6802",
     "seed": 336,
     "batch_size": 1,
     "dtype": "bfloat16",
@@ -223,5 +228,29 @@
     ],
     "process_isolation": "one fresh Python process per implementation and shape",
     "peak_memory_scope": "one steady-state phase call after empty_cache and reset_peak_memory_stats"
+  },
+  "flash_correctness": {
+    "commit": "5890454a042ef6db6a12c205ccf8a0a530cc6802",
+    "seeds": [
+      336,
+      337,
+      338
+    ],
+    "batch_size": 1,
+    "sequence_length": 256,
+    "head_dims": [
+      32,
+      64,
+      128
+    ],
+    "dtype": "float32",
+    "causal": [
+      false,
+      true
+    ],
+    "tolerance": {
+      "rtol": 0.01,
+      "atol": 0.01
+    }
   }
 }
