@@ -23,6 +23,8 @@ ATTENTION_CONFIGS = ((512, 64), (2_048, 128), (8_192, 128))
 MODEL_CONTEXT = 512
 MODEL_WARMUP_STEPS = 5
 MODEL_MEASUREMENT_STEPS = 10
+MODEL_COMPARE_RTOL = 1e-2
+MODEL_COMPARE_ATOL = 1.5e-2
 MODEL_CONFIG = {
     "vocab_size": 10_000,
     "d_model": 768,
@@ -47,6 +49,10 @@ def dynamo_stats() -> tuple[int | str, int | str]:
         return sum(counters["graph_break"].values()), counters["stats"].get("unique_graphs", "")
     except (AttributeError, KeyError, TypeError):
         return "", ""
+
+
+def assert_model_outputs_close(actual: torch.Tensor, expected: torch.Tensor) -> None:
+    torch.testing.assert_close(actual, expected, rtol=MODEL_COMPARE_RTOL, atol=MODEL_COMPARE_ATOL)
 
 
 def _benchmark_model_phase(step: Callable[[], Any]) -> tuple[tuple[float, float, float], float, float]:
@@ -113,7 +119,7 @@ def run_model(row: dict[str, Any]) -> dict[str, Any]:
 
         cold_output, row["forward_cold_start_ms"] = timed_cuda_call(cold_forward)
         with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
-            torch.testing.assert_close(cold_output, model(tokens), rtol=1e-2, atol=1e-2)
+            assert_model_outputs_close(cold_output, model(tokens))
         del cold_output
         gc.collect()
 

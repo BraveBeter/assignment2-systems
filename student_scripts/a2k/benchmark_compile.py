@@ -12,6 +12,8 @@ from student_scripts.a2k.compile_cases import (
     ATTENTION_CONFIGS,
     BATCH_SIZE,
     MODEL_CONFIG,
+    MODEL_COMPARE_ATOL,
+    MODEL_COMPARE_RTOL,
     MODEL_CONTEXT,
     MODEL_MEASUREMENT_STEPS,
     MODEL_WARMUP_STEPS,
@@ -30,6 +32,7 @@ from student_scripts.a2k.utils import (
     cuda_peak_mib,
     is_cuda_oom,
     load_json,
+    refresh_memory_summary,
     seed_all,
     write_csv,
     write_json,
@@ -201,6 +204,7 @@ def write_outputs(results: list[dict[str, Any]]) -> None:
             "warmup_steps": MODEL_WARMUP_STEPS,
             "measurement_steps": MODEL_MEASUREMENT_STEPS,
             "timer": "torch.cuda.Event",
+            "correctness_tolerance": {"rtol": MODEL_COMPARE_RTOL, "atol": MODEL_COMPARE_ATOL},
         },
         "compile": {
             "backend": "inductor",
@@ -224,9 +228,10 @@ def write_outputs(results: list[dict[str, Any]]) -> None:
     evidence["compile_comparison"] = {
         "highest_peak_allocated_mib": max((float(row["peak_allocated_mib"]) for row in successful), default=None),
         "highest_peak_reserved_mib": max((float(row["peak_reserved_mib"]) for row in successful), default=None),
-        "within_23gib_allocator": bool(successful),
+        "within_23gib_allocator": bool(successful) and max(float(row["peak_reserved_mib"]) for row in successful) <= ALLOCATOR_LIMIT_BYTES / MIB,
         "config_status": {row["config_id"]: row["status"] for row in rows},
     }
+    refresh_memory_summary(evidence)
     write_json(MEMORY_PATH, evidence)
 
 

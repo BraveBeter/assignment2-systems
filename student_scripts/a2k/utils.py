@@ -143,6 +143,17 @@ def allocator_evidence() -> dict[str, int | float]:
     }
 
 
+def refresh_memory_summary(evidence: dict[str, Any]) -> dict[str, Any]:
+    sections = tuple(evidence.get(name, {}) for name in ("checkpointing", "attention_baseline", "compile_comparison", "flash_benchmark"))
+    allocated = [float(section["highest_peak_allocated_mib"]) for section in sections if section.get("highest_peak_allocated_mib") is not None]
+    reserved = [float(section["highest_peak_reserved_mib"]) for section in sections if section.get("highest_peak_reserved_mib") is not None]
+    evidence["hard_limit_mib"] = 24 * 1024
+    evidence["pytorch_peak_allocated_mib"] = max(allocated, default=None)
+    evidence["pytorch_peak_reserved_mib"] = max(reserved, default=None)
+    evidence["within_24gib"] = bool(reserved) and max(reserved) <= evidence["hard_limit_mib"]
+    return evidence
+
+
 def benchmark_cuda(step: Callable[[], Any]) -> tuple[float, float, float]:
     values = import_module("triton.testing").do_bench(
         step,

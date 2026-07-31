@@ -121,7 +121,7 @@
     }
   },
   "hard_limit_mib": 24576,
-  "pytorch_peak_allocated_mib": 3880.40625,
-  "pytorch_peak_reserved_mib": 4394.0,
+  "pytorch_peak_allocated_mib": 19623.6689453125,
+  "pytorch_peak_reserved_mib": 19936.0,
   "within_24gib": true
 }

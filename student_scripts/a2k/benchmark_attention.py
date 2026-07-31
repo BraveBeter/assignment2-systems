@@ -27,6 +27,7 @@ from student_scripts.a2k.utils import (
     latency_columns,
     load_json,
     measure_cuda_peak,
+    refresh_memory_summary,
     seed_all,
     write_csv,
     write_json,
@@ -196,9 +197,10 @@ def write_outputs(results: list[dict[str, Any]]) -> None:
     evidence["attention_baseline"] = {
         "highest_peak_allocated_mib": max((float(row["peak_allocated_mib"]) for row in successful), default=None),
         "highest_peak_reserved_mib": max((float(row["peak_reserved_mib"]) for row in successful), default=None),
-        "within_23gib_allocator": bool(successful),
+        "within_23gib_allocator": bool(successful) and max(float(row["peak_reserved_mib"]) for row in successful) <= ALLOCATOR_LIMIT_BYTES / MIB,
         "config_status": {row["config_id"]: row["status"] for row in rows},
     }
+    refresh_memory_summary(evidence)
     write_json(MEMORY_PATH, evidence)
 
 

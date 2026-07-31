@@ -15,6 +15,9 @@ PYTORCH_TILE_SIZE = 128
 TRITON_TILE_SIZE = 64
 TRITON_NUM_WARPS = 4
 TRITON_NUM_STAGES = 2
+TRITON_FP32_TILE_SIZE = 32
+TRITON_FP32_NUM_WARPS = 2
+TRITON_FP32_NUM_STAGES = 1
 
 
 def _validate_inputs(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> None:
@@ -180,18 +183,22 @@ if triton is not None:
         tl.store(dq_ptr + batch * stride_dqb + offsets_m[:, None] * stride_dqq + offsets_d[None, :] * stride_dqd, (dq * scale).to(q.dtype), mask=query_mask[:, None])
 
 
-def _triton_tile_size(length: int) -> int:
-    return min(TRITON_TILE_SIZE, 1 << (length.bit_length() - 1))
+def _triton_config(length: int, dtype: torch.dtype) -> tuple[int, int, int, int]:
+    tile_limit = TRITON_FP32_TILE_SIZE if dtype == torch.float32 else TRITON_TILE_SIZE
+    tile = min(tile_limit, 1 << (length.bit_length() - 1))
+    num_warps, num_stages = (TRITON_FP32_NUM_WARPS, TRITON_FP32_NUM_STAGES) if dtype == torch.float32 else (TRITON_NUM_WARPS, TRITON_NUM_STAGES)
+    return tile, tile, num_warps, num_stages
 
 
 def flash_attention_backward_triton(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, o: torch.Tensor, do: torch.Tensor, lse: torch.Tensor, is_causal: bool) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if triton is None or not q.is_cuda:
         raise RuntimeError("FlashAttentionTriton requires CUDA and the Triton package")
-    block_m, block_n = _triton_tile_size(q.shape[1]), _triton_tile_size(k.shape[1])
+    block_m, _, num_warps, num_stages = _triton_config(q.shape[1], q.dtype)
+    block_n = _triton_config(k.shape[1], k.dtype)[0]
     delta, dq, dk, dv = torch.empty(q.shape[:2], device=q.device, dtype=torch.float32), torch.empty_like(q), torch.empty_like(k), torch.empty_like(v)
-    flash_bwd_delta_kernel[(triton.cdiv(q.shape[1], block_m), q.shape[0])](o, do, delta, *o.stride(), *do.stride(), *delta.stride(), q.shape[1], q.shape[-1], block_m, num_warps=TRITON_NUM_WARPS, num_stages=TRITON_NUM_STAGES)
-    flash_bwd_dkdv_kernel[(triton.cdiv(k.shape[1], block_n), q.shape[0])](q, k, v, do, lse, delta, dk, dv, *q.stride(), *k.stride(), *v.stride(), *do.stride(), *lse.stride(), *delta.stride(), *dk.stride(), *dv.stride(), q.shape[1], k.shape[1], q.shape[-1] ** -0.5, q.shape[-1], block_m, block_n, is_causal, num_warps=TRITON_NUM_WARPS, num_stages=TRITON_NUM_STAGES)
-    flash_bwd_dq_kernel[(triton.cdiv(q.shape[1], block_m), q.shape[0])](q, k, v, do, lse, delta, dq, *q.stride(), *k.stride(), *v.stride(), *do.stride(), *lse.stride(), *delta.stride(), *dq.stride(), q.shape[1], k.shape[1], q.shape[-1] ** -0.5, q.shape[-1], block_m, block_n, is_causal, num_warps=TRITON_NUM_WARPS, num_stages=TRITON_NUM_STAGES)
+    flash_bwd_delta_kernel[(triton.cdiv(q.shape[1], block_m), q.shape[0])](o, do, delta, *o.stride(), *do.stride(), *delta.stride(), q.shape[1], q.shape[-1], block_m, num_warps=num_warps, num_stages=num_stages)
+    flash_bwd_dkdv_kernel[(triton.cdiv(k.shape[1], block_n), q.shape[0])](q, k, v, do, lse, delta, dk, dv, *q.stride(), *k.stride(), *v.stride(), *do.stride(), *lse.stride(), *delta.stride(), *dk.stride(), *dv.stride(), q.shape[1], k.shape[1], q.shape[-1] ** -0.5, q.shape[-1], block_m, block_n, is_causal, num_warps=num_warps, num_stages=num_stages)
+    flash_bwd_dq_kernel[(triton.cdiv(q.shape[1], block_m), q.shape[0])](q, k, v, do, lse, delta, dq, *q.stride(), *k.stride(), *v.stride(), *do.stride(), *lse.stride(), *delta.stride(), *dq.stride(), q.shape[1], k.shape[1], q.shape[-1] ** -0.5, q.shape[-1], block_m, block_n, is_causal, num_warps=num_warps, num_stages=num_stages)
     return dq, dk, dv
 
 
@@ -216,13 +223,14 @@ class FlashAttentionTriton(torch.autograd.Function):
         _validate_inputs(q, k, v)
         if triton is None or not q.is_cuda:
             raise RuntimeError("FlashAttentionTriton requires CUDA and the Triton package")
-        block_m, block_n = _triton_tile_size(q.shape[1]), _triton_tile_size(k.shape[1])
+        block_m, _, num_warps, num_stages = _triton_config(q.shape[1], q.dtype)
+        block_n = _triton_config(k.shape[1], k.dtype)[0]
         o, lse = torch.empty_like(q), torch.empty(q.shape[:2], device=q.device, dtype=torch.float32)
         flash_fwd_kernel[(triton.cdiv(q.shape[1], block_m), q.shape[0])](
             q, k, v, o, lse,
             *q.stride(), *k.stride(), *v.stride(), *o.stride(), *lse.stride(),
             q.shape[1], k.shape[1], q.shape[-1] ** -0.5, q.shape[-1], block_m, block_n, is_causal,
-            num_warps=TRITON_NUM_WARPS, num_stages=TRITON_NUM_STAGES,
+            num_warps=num_warps, num_stages=num_stages,
         )
         ctx.is_causal = is_causal
         ctx.save_for_backward(q, k, v, o, lse)

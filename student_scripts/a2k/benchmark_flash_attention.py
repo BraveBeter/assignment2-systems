@@ -17,7 +17,7 @@ import torch
 from cs336_basics.model import scaled_dot_product_attention
 from cs336_systems.a2k.attention import FlashAttentionTriton, TRITON_NUM_STAGES, TRITON_NUM_WARPS, TRITON_TILE_SIZE
 from student_scripts.a2k.flash_common import causal_mask, make_attention_inputs
-from student_scripts.a2k.utils import ALLOCATOR_LIMIT_BYTES, ATTENTION_QUANTILES, ATTENTION_REP_MS, ATTENTION_WARMUP_MS, MIB, allocator_evidence, benchmark_cuda, configure_cuda, cuda_peak_mib, is_cuda_oom, latency_columns, load_json, measure_cuda_peak, write_csv, write_json
+from student_scripts.a2k.utils import ALLOCATOR_LIMIT_BYTES, ATTENTION_QUANTILES, ATTENTION_REP_MS, ATTENTION_WARMUP_MS, MIB, allocator_evidence, benchmark_cuda, configure_cuda, cuda_peak_mib, is_cuda_oom, latency_columns, load_json, measure_cuda_peak, refresh_memory_summary, write_csv, write_json
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -140,9 +140,7 @@ def write_outputs(results: list[dict[str, Any]]) -> None:
     evidence["allocator"] = allocator_evidence()
     evidence["flash_benchmark"] = {"highest_peak_allocated_mib": max((float(row["peak_allocated_mib"]) for row in successful), default=None), "highest_peak_reserved_mib": max((float(row["peak_reserved_mib"]) for row in successful), default=None), "within_23gib_allocator": all(float(row["peak_reserved_mib"]) <= ALLOCATOR_LIMIT_BYTES / MIB for row in successful), "config_status": {row["config_id"]: row["status"] for row in rows}}
     evidence["hard_limit_mib"] = 24 * 1024
-    evidence["pytorch_peak_allocated_mib"] = evidence["flash_benchmark"]["highest_peak_allocated_mib"]
-    evidence["pytorch_peak_reserved_mib"] = evidence["flash_benchmark"]["highest_peak_reserved_mib"]
-    evidence["within_24gib"] = bool(evidence["pytorch_peak_reserved_mib"] is not None and evidence["pytorch_peak_reserved_mib"] <= 24 * 1024)
+    refresh_memory_summary(evidence)
     write_json(MEMORY_PATH, evidence)
 
 

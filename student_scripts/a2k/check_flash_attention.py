@@ -30,30 +30,35 @@ def compare(actual: torch.Tensor, expected: torch.Tensor) -> dict[str, Any]:
 
 
 def evaluate(name: str, function: type[torch.autograd.Function], seed: int, head_dim: int, is_causal: bool) -> dict[str, Any]:
-    q, k, v, do = make_attention_inputs(seed, SEQUENCE_LENGTH, head_dim, torch.float32)
-    q_ref, k_ref, v_ref = (tensor.detach().clone().requires_grad_() for tensor in (q, k, v))
-    expected_output, expected_lse = attention_reference(q_ref, k_ref, v_ref, is_causal)
-    expected_output.backward(do)
-    output = function.apply(q, k, v, is_causal)
-    lse = saved_lse(output).detach()
-    output.backward(do)
-    checks = {
-        "output": compare(output.detach(), expected_output.detach()),
-        "logsumexp": compare(lse, expected_lse.detach()),
-        "dQ": compare(q.grad, q_ref.grad),
-        "dK": compare(k.grad, k_ref.grad),
-        "dV": compare(v.grad, v_ref.grad),
-    }
-    return {"implementation": name, "seed": seed, "batch_size": 1, "sequence_length": SEQUENCE_LENGTH, "head_dim": head_dim, "dtype": "float32", "is_causal": is_causal, "tolerance": TOLERANCE, "checks": checks, "status": "pass" if all(check["pass"] for check in checks.values()) else "fail"}
+    record = {"implementation": name, "seed": seed, "batch_size": 1, "sequence_length": SEQUENCE_LENGTH, "head_dim": head_dim, "dtype": "float32", "is_causal": is_causal, "tolerance": TOLERANCE}
+    try:
+        q, k, v, do = make_attention_inputs(seed, SEQUENCE_LENGTH, head_dim, torch.float32)
+        q_ref, k_ref, v_ref = (tensor.detach().clone().requires_grad_() for tensor in (q, k, v))
+        expected_output, expected_lse = attention_reference(q_ref, k_ref, v_ref, is_causal)
+        expected_output.backward(do)
+        output = function.apply(q, k, v, is_causal)
+        lse = saved_lse(output).detach()
+        output.backward(do)
+        checks = {
+            "output": compare(output.detach(), expected_output.detach()),
+            "logsumexp": compare(lse, expected_lse.detach()),
+            "dQ": compare(q.grad, q_ref.grad),
+            "dK": compare(k.grad, k_ref.grad),
+            "dV": compare(v.grad, v_ref.grad),
+        }
+        return {**record, "checks": checks, "status": "pass" if all(check["pass"] for check in checks.values()) else "fail"}
+    except Exception as error:
+        return {**record, "checks": {}, "status": f"error:{type(error).__name__}", "error": str(error).splitlines()[0][:300]}
 
 
 def main() -> None:
     metadata = configure_cuda()
+    torch.cuda.init()
     records = [evaluate(name, function, seed, head_dim, is_causal) for name, function in IMPLEMENTATIONS.items() for seed in SEEDS for head_dim in HEAD_DIMS for is_causal in (False, True)]
     commit = subprocess.run(["git", "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
-    write_json(OUTPUT, {"command": "uv run python -m student_scripts.a2k.check_flash_attention", "commit": commit, "metadata": metadata, "records": records})
+    write_json(OUTPUT, {"command": "python -m student_scripts.a2k.check_flash_attention", "commit": commit, "metadata": metadata, "records": records})
     run_metadata = load_json(METADATA_PATH)
-    run_metadata.setdefault("commands", {})["flash_correctness"] = "uv run python -m student_scripts.a2k.check_flash_attention"
+    run_metadata.setdefault("commands", {})["flash_correctness"] = "python -m student_scripts.a2k.check_flash_attention"
     run_metadata["flash_correctness"] = {"commit": commit, "seeds": SEEDS, "batch_size": 1, "sequence_length": SEQUENCE_LENGTH, "head_dims": HEAD_DIMS, "dtype": "float32", "causal": (False, True), "tolerance": TOLERANCE}
     run_metadata.update(metadata)
     write_json(METADATA_PATH, run_metadata)

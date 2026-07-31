@@ -13,7 +13,7 @@ from torch.utils.checkpoint import checkpoint
 
 from cs336_basics.model import BasicsTransformerLM
 from cs336_basics.nn_utils import cross_entropy
-from student_scripts.a2k.utils import ALLOCATOR_LIMIT_BYTES, MIB, benchmark_cuda_step, configure_cuda, cuda_peak_mib, is_cuda_oom, load_json, seed_all, write_csv, write_json
+from student_scripts.a2k.utils import ALLOCATOR_LIMIT_BYTES, MIB, benchmark_cuda_step, configure_cuda, cuda_peak_mib, is_cuda_oom, load_json, refresh_memory_summary, seed_all, write_csv, write_json
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -224,6 +224,7 @@ def write_outputs(results: list[dict[str, Any]]) -> None:
         "within_24gib": bool(reserved) and max(reserved) < 24 * 1024,
         "config_status": {row["config_id"]: row["status"] for row in rows},
     }
+    refresh_memory_summary(evidence)
     write_json(MEMORY_PATH, evidence)
 
 
