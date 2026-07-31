@@ -83,12 +83,15 @@ if triton is not None:
             key_offsets, key_mask = key_start + offsets_n, key_start + offsets_n < n_keys
             k = tl.load(k_ptr + batch * stride_kb + key_offsets[:, None] * stride_kk + offsets_d[None, :] * stride_kd, mask=key_mask[:, None], other=0.0)
             v = tl.load(v_ptr + batch * stride_vb + key_offsets[:, None] * stride_vk + offsets_d[None, :] * stride_vd, mask=key_mask[:, None], other=0.0)
-            scores = tl.dot(q, tl.trans(k)) * scale
+            scores = tl.dot(q, tl.trans(k), input_precision="ieee") * scale
             valid = key_mask[None, :] & (offsets_m[:, None] >= key_offsets[None, :]) if is_causal else key_mask[None, :]
             scores = tl.where(valid, scores, -1.0e6)
             next_m = tl.maximum(m, tl.max(scores, axis=1))
             p, alpha = tl.exp(scores - next_m[:, None]), tl.exp(m - next_m)
-            normalizer, acc, m = normalizer * alpha + tl.sum(p, axis=1), tl.dot(p.to(v.dtype), v, acc=acc), next_m
+            normalizer = normalizer * alpha + tl.sum(p, axis=1)
+            acc = acc * alpha[:, None]
+            acc = tl.dot(p.to(v.dtype), v, acc=acc)
+            m = next_m
         output = acc / normalizer[:, None]
         tl.store(o_ptr + batch * stride_ob + offsets_m[:, None] * stride_oq + offsets_d[None, :] * stride_od, output.to(q.dtype), mask=q_mask[:, None])
         tl.store(l_ptr + batch * stride_lb + offsets_m * stride_lq, m + tl.log(normalizer), mask=q_mask)
@@ -135,11 +138,12 @@ if triton is not None:
             do = tl.load(do_ptr + batch * stride_dob + query_offsets[:, None] * stride_doq + offsets_d[None, :] * stride_dod, mask=query_mask[:, None], other=0.0)
             lse = tl.load(l_ptr + batch * stride_lb + query_offsets * stride_lq, mask=query_mask, other=0.0)
             delta = tl.load(delta_ptr + batch * stride_db + query_offsets * stride_dq, mask=query_mask, other=0.0)
-            scores = tl.dot(q, tl.trans(k)) * scale
+            scores = tl.dot(q, tl.trans(k), input_precision="ieee") * scale
             valid = query_mask[:, None] & key_mask[None, :] & (query_offsets[:, None] >= offsets_n[None, :]) if is_causal else query_mask[:, None] & key_mask[None, :]
             p = tl.exp(tl.where(valid, scores, -1.0e6) - lse[:, None])
-            ds = p * (tl.dot(do, tl.trans(v)) - delta[:, None])
-            dk, dv = tl.dot(tl.trans(ds).to(q.dtype), q, acc=dk), tl.dot(tl.trans(p).to(do.dtype), do, acc=dv)
+            ds = p * (tl.dot(do, tl.trans(v), input_precision="ieee") - delta[:, None])
+            dk = tl.dot(tl.trans(ds).to(q.dtype), q, acc=dk)
+            dv = tl.dot(tl.trans(p).to(do.dtype), do, acc=dv)
         tl.store(dk_ptr + batch * stride_dkb + offsets_n[:, None] * stride_dkk + offsets_d[None, :] * stride_dkd, (dk * scale).to(k.dtype), mask=key_mask[:, None])
         tl.store(dv_ptr + batch * stride_dvb + offsets_n[:, None] * stride_dvk + offsets_d[None, :] * stride_dvd, dv.to(v.dtype), mask=key_mask[:, None])
 
@@ -168,10 +172,10 @@ if triton is not None:
             key_offsets, key_mask = key_start + offsets_n, key_start + offsets_n < n_keys
             k = tl.load(k_ptr + batch * stride_kb + key_offsets[:, None] * stride_kk + offsets_d[None, :] * stride_kd, mask=key_mask[:, None], other=0.0)
             v = tl.load(v_ptr + batch * stride_vb + key_offsets[:, None] * stride_vk + offsets_d[None, :] * stride_vd, mask=key_mask[:, None], other=0.0)
-            scores = tl.dot(q, tl.trans(k)) * scale
+            scores = tl.dot(q, tl.trans(k), input_precision="ieee") * scale
             valid = query_mask[:, None] & key_mask[None, :] & (offsets_m[:, None] >= key_offsets[None, :]) if is_causal else query_mask[:, None] & key_mask[None, :]
             p = tl.exp(tl.where(valid, scores, -1.0e6) - lse[:, None])
-            ds = p * (tl.dot(do, tl.trans(v)) - delta[:, None])
+            ds = p * (tl.dot(do, tl.trans(v), input_precision="ieee") - delta[:, None])
             dq = tl.dot(ds.to(k.dtype), k, acc=dq)
         tl.store(dq_ptr + batch * stride_dqb + offsets_m[:, None] * stride_dqq + offsets_d[None, :] * stride_dqd, (dq * scale).to(q.dtype), mask=query_mask[:, None])
 
